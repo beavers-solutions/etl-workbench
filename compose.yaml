@@ -26,7 +26,7 @@ services:
     environment:
       <<: *airflow-environment
     ports:
-      - "127.0.0.1:${AIRFLOW_UI_PORT:-18080}:8080"
+      - "${AIRFLOW_UI_HOST:-127.0.0.1}:${AIRFLOW_UI_PORT:-18080}:8080"
     volumes:
       - airflow-home:/var/lib/airflow
     depends_on:
