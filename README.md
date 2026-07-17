@@ -74,7 +74,7 @@ acme-pipeline/
 A pipeline image can add Python packages or application code:
 
 ```dockerfile
-ARG ETL_WORKBENCH_IMAGE=ghcr.io/beavers-solutions/etl-workbench:v0.2.0
+ARG ETL_WORKBENCH_IMAGE=etl-workbench:local
 FROM ${ETL_WORKBENCH_IMAGE}
 
 COPY --chown=airflow:root pyproject.toml src/ /tmp/pipeline/
