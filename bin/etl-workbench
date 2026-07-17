@@ -46,15 +46,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def bundle_config(args: argparse.Namespace, connection_id: str | None) -> str:
+def bundle_config(args: argparse.Namespace, connection_id: str) -> str:
     kwargs: dict[str, object] = {
         "tracking_ref": args.ref,
         "subdir": args.subdir,
     }
-    if connection_id:
-        kwargs["git_conn_id"] = connection_id
-    else:
-        kwargs["repo_url"] = args.repository
+    kwargs["git_conn_id"] = connection_id
     return json.dumps(
         [
             {
@@ -96,25 +93,27 @@ def main() -> None:
         command.append(f"{args.repository}#{args.ref}")
         run(command)
 
-    connection_id = args.git_connection
+    connection_id = args.git_connection or "workbench_git"
     runtime_lines: list[str] = []
     compose_files = ["-f", "compose.yaml"]
     compose_env = os.environ.copy()
 
-    if ssh_key:
-        connection_id = "workbench_git"
+    if not args.git_connection:
         connection = {
             "conn_type": "git",
             "host": args.repository,
-            "extra": {
+        }
+        if ssh_key:
+            connection["extra"] = {
                 "private_key": ssh_key.read_text(),
                 "strict_host_key_checking": "yes",
                 "known_hosts_file": "/var/lib/airflow/.ssh/known_hosts",
-            },
-        }
+            }
         runtime_lines.append(
             "AIRFLOW_CONN_WORKBENCH_GIT=" + json.dumps(connection, separators=(",", ":"))
         )
+
+    if ssh_key:
         compose_files.extend(["-f", "compose.git-ssh.yaml"])
         compose_env["GIT_KNOWN_HOSTS_PATH"] = str(known_hosts)
 
@@ -147,4 +146,3 @@ if __name__ == "__main__":
         main()
     except subprocess.CalledProcessError as error:
         raise SystemExit(error.returncode) from error
-
