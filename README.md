@@ -1,44 +1,39 @@
 # ETL Workbench
 
 A small local Apache Airflow workbench for trusted, code-defined ETL pipelines.
-It provides orchestration and optional local PostgreSQL and S3-compatible object
-storage. Pipeline code, schemas, migrations, and data lifecycle rules stay in a
-separate repository.
+It runs Airflow and, when requested, local PostgreSQL and S3-compatible object
+storage. Pipeline code and data contracts stay in their own repositories.
 
 This is a single-user development tool. It is not a shared scheduler, control
-plane, deployment system, or isolation boundary for untrusted DAG code.
+plane, deployment platform, or isolation boundary for untrusted DAG code.
 
 ## Requirements
 
 - Docker Desktop or Docker Engine with Compose
 - at least 4 GB of memory available to Docker
-- a pipeline repository containing `dags/`, `src/`, and `pyproject.toml`
+- a pipeline Git repository containing `dags/`
+- `Dockerfile.airflow` in that repository when the pipeline needs its own image
 
-The included `example-pipeline` satisfies that contract and is the default.
+## Start a Git pipeline
 
-## Start
-
-Airflow only, with connections configured for external services:
-
-```bash
-cp .env.example .env
-docker build -t etl-workbench:local .
-docker compose up airflow
-```
-
-Fully local:
+For a public repository:
 
 ```bash
-docker build -t etl-workbench:local .
-docker compose --profile local-db --profile local-objects up
+./bin/etl-workbench https://github.com/example/acme-pipeline.git
 ```
 
-Mixed modes enable exactly one profile:
+For a private SSH repository:
 
 ```bash
-docker compose --profile local-db up
-docker compose --profile local-objects up
+./bin/etl-workbench git@github.com:example/acme-pipeline.git \
+  --ssh-key ~/.ssh/id_ed25519
 ```
+
+The command builds the workbench image, builds the pipeline's
+`Dockerfile.airflow`, configures Airflow's native `GitDagBundle`, starts local
+PostgreSQL and object storage, and waits for the services to become healthy.
+Airflow then clones and refreshes the DAG bundle itself. Each task run records
+the Git version of the DAG code that produced it.
 
 Open <http://127.0.0.1:18080>. The generated local login is stored inside the
 `airflow-home` volume:
@@ -48,87 +43,78 @@ docker compose exec airflow \
   cat /var/lib/airflow/simple_auth_manager_passwords.json.generated
 ```
 
-Local profile connection IDs are `local_postgres` and `local_s3`; the local
-bucket is `etl-local`. For external systems, create any required connections in
-the Airflow UI or override the connection environment variables in `.env`.
-The UI's connection test is intentionally disabled because runtime hooks are
-the authoritative check, including for S3-compatible services.
-Pipelines that require local SSE-S3 may set their own development-only
-`MINIO_KMS_SECRET_KEY` in the ignored `.env` file.
-
-## Attach a pipeline repository
-
-Set an absolute path in `.env`:
-
-```dotenv
-PIPELINE_ROOT=/absolute/path/to/my-pipeline
-PIPELINE_ENV_FILE=/absolute/path/to/my-pipeline/pipeline.env
-```
-
-Expected layout:
+Useful options:
 
 ```text
-my-pipeline/
-├── dags/
-├── src/
-└── pyproject.toml
+--ref VERSION            branch, tag, or commit; default: main
+--subdir PATH            DAG directory; default: dags
+--image IMAGE            use a prebuilt pipeline image
+--env FILE               pipeline-owned runtime environment
+--external-db            do not start local PostgreSQL
+--external-objects       do not start local object storage
+--git-connection ID      use an existing Airflow Git connection
 ```
 
-The `dags/` and `src/` directories are mounted read-only. A missing directory
-fails startup instead of silently creating an empty mount. Airflow discovers
-all compatible DAGs in `dags/`, while `/opt/pipeline/src` is on `PYTHONPATH`.
-The optional environment file is pipeline-owned and must never be committed
-when it contains credentials.
+With `--ssh-key`, the launcher writes a generated Airflow connection to the
+ignored `.workbench/runtime.env` with mode `0600`. The private key is used by
+Docker BuildKit and the local Airflow container; it is not copied into the
+image. Host-key checking uses `~/.ssh/known_hosts` by default.
 
-Pipeline-specific dependencies belong in a derived image, never in a runtime
-`pip install`:
+## Pipeline repository contract
+
+The smallest repository contains one or more DAG files:
+
+```text
+acme-pipeline/
+├── dags/
+│   └── pipeline.py
+└── Dockerfile.airflow
+```
+
+A pipeline image can add Python packages or application code:
 
 ```dockerfile
-FROM etl-workbench:local
+ARG ETL_WORKBENCH_IMAGE=ghcr.io/beavers-solutions/etl-workbench:v0.2.0
+FROM ${ETL_WORKBENCH_IMAGE}
 
-COPY --chown=airflow:root pyproject.toml /tmp/pipeline/pyproject.toml
-COPY --chown=airflow:root src /tmp/pipeline/src
+COPY --chown=airflow:root pyproject.toml src/ /tmp/pipeline/
 RUN pip install --no-cache-dir /tmp/pipeline
 ```
 
-Build it and set `AIRFLOW_IMAGE` in `.env`:
+The launcher overrides `ETL_WORKBENCH_IMAGE` with the locally built workbench
+image. Runtime secrets belong in an ignored pipeline environment file and are
+passed with `--env`; never bake them into the image or DAG files.
+
+Airflow discovers compatible DAGs from the Git bundle and displays them in its
+UI. The pipeline repository owns schemas and migrations, retry and idempotency
+behavior, object keys and retention, and all business logic.
+
+Local profile connection IDs are `local_postgres` and `local_s3`; the local
+bucket is `etl-local`. External connections may be created in the Airflow UI or
+provided as `AIRFLOW_CONN_*` variables in the pipeline environment file.
+
+## Local path development
+
+The included example can be mounted read-only without Git:
 
 ```bash
-docker build -t my-pipeline-airflow:local -f Dockerfile.airflow .
+docker build -t etl-workbench:local .
+docker compose -f compose.yaml -f compose.local.yaml \
+  --profile local-db --profile local-objects up
 ```
 
-```dotenv
-AIRFLOW_IMAGE=my-pipeline-airflow:local
-```
-
-The pipeline repository owns its database schema and migrations, retry and
-idempotency behavior, object keys and buckets, retention, and business logic.
-This repository owns none of those contracts.
+Set `PIPELINE_ROOT` to use another local repository. This fallback expects both
+`dags/` and `src/`; GitDagBundle is the normal repository integration.
 
 ## Verify
 
-Validate topology and imports:
-
 ```bash
 docker compose config --quiet
-docker compose --profile local-db config --quiet
-docker compose --profile local-objects config --quiet
-docker compose --profile local-db --profile local-objects config --quiet
+docker compose -f compose.yaml -f compose.local.yaml config --quiet
 docker build -t etl-workbench:local .
-docker compose run --rm airflow python -c \
+docker compose -f compose.yaml -f compose.local.yaml run --rm airflow python -c \
   'from airflow.models import DagBag; b=DagBag("/opt/airflow/dags"); assert not b.import_errors, b.import_errors'
 ```
-
-With both local services running, execute the neutral runtime and storage DAGs:
-
-```bash
-docker compose --profile local-db --profile local-objects up -d
-docker compose exec airflow airflow dags test workbench_runtime_smoke 2026-01-01
-docker compose exec airflow airflow dags test workbench_storage_smoke 2026-01-01
-```
-
-Use small serializable values in XCom. Persist real datasets in PostgreSQL or
-object storage and pass references between tasks.
 
 ## Stop
 
@@ -138,15 +124,16 @@ Keep local history and data:
 docker compose --profile local-db --profile local-objects down
 ```
 
-Explicitly delete all workbench volumes:
+Explicitly delete workbench volumes and generated Git credentials:
 
 ```bash
 docker compose --profile local-db --profile local-objects down --volumes
+rm -rf .workbench
 ```
 
 Scheduled runs stop when the laptop or Compose stack stops. Shared scheduling,
-remote Airflow metadata, multiple isolated pipeline environments, distributed
-executors, monitoring, and untrusted DAG execution are outside v1.
+remote Airflow metadata, distributed executors, monitoring, and untrusted DAG
+execution are outside this workbench's scope.
 
 ## License
 

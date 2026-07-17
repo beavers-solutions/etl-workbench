@@ -19,6 +19,8 @@ services:
     command: ["airflow", "standalone"]
     restart: unless-stopped
     env_file:
+      - path: ${WORKBENCH_ENV_FILE:-./workbench.env}
+        required: false
       - path: ${PIPELINE_ENV_FILE:-./pipeline.env}
         required: false
     environment:
@@ -27,24 +29,6 @@ services:
       - "127.0.0.1:${AIRFLOW_UI_PORT:-18080}:8080"
     volumes:
       - airflow-home:/var/lib/airflow
-      - type: bind
-        source: ${PIPELINE_ROOT:-./example-pipeline}/dags
-        target: /opt/airflow/dags
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${PIPELINE_ROOT:-./example-pipeline}/src
-        target: /opt/pipeline/src
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${PIPELINE_ROOT:-./example-pipeline}/pyproject.toml
-        target: /opt/pipeline/pyproject.toml
-        read_only: true
-        bind:
-          create_host_path: false
     depends_on:
       postgres:
         condition: service_healthy

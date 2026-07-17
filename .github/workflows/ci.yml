@@ -21,6 +21,7 @@ jobs:
       - name: Validate all storage modes
         run: |
           docker compose config --quiet
+          docker compose -f compose.yaml -f compose.local.yaml config --quiet
           docker compose --profile local-db config --quiet
           docker compose --profile local-objects config --quiet
           docker compose --profile local-db --profile local-objects config --quiet
@@ -33,7 +34,7 @@ jobs:
 
       - name: Import example DAGs
         run: >-
-          docker compose run --rm airflow python -c
+          docker compose -f compose.yaml -f compose.local.yaml run --rm airflow python -c
           'from airflow.models import DagBag;
           bag = DagBag("/opt/airflow/dags");
           assert not bag.import_errors, bag.import_errors;
@@ -41,14 +42,38 @@ jobs:
 
       - name: Run full local smoke
         run: |
-          docker compose --profile local-db --profile local-objects up -d --wait
-          docker compose exec airflow airflow dags test workbench_runtime_smoke 2026-01-01
-          docker compose exec airflow airflow dags test workbench_storage_smoke 2026-01-01
+          docker compose -f compose.yaml -f compose.local.yaml --profile local-db --profile local-objects up -d --wait
+          docker compose -f compose.yaml -f compose.local.yaml exec airflow airflow dags test workbench_runtime_smoke 2026-01-01
+          docker compose -f compose.yaml -f compose.local.yaml exec airflow airflow dags test workbench_storage_smoke 2026-01-01
+          docker compose -f compose.yaml -f compose.local.yaml --profile local-db --profile local-objects down --volumes
+
+      - name: Run native Git bundle smoke
+        env:
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.clone_url }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          repository="${HEAD_REPOSITORY:-https://github.com/${GITHUB_REPOSITORY}.git}"
+          ref="${HEAD_REF:-${GITHUB_REF_NAME}}"
+          ./bin/etl-workbench "$repository" \
+            --ref "$ref" \
+            --subdir example-pipeline/dags \
+            --image etl-workbench:local
+          for attempt in $(seq 1 20); do
+            if docker compose exec airflow airflow dags list | grep -q workbench_runtime_smoke; then
+              break
+            fi
+            if [ "$attempt" -eq 20 ]; then
+              exit 1
+            fi
+            sleep 3
+          done
+          docker compose exec airflow airflow dags list | grep pipeline
+          docker compose exec airflow airflow dags test workbench_runtime_smoke 2026-01-02
 
       - name: Show service logs after failure
         if: failure()
-        run: docker compose --profile local-db --profile local-objects logs --no-color
+        run: docker compose -f compose.yaml -f compose.local.yaml --profile local-db --profile local-objects logs --no-color
 
       - name: Remove disposable volumes
         if: always()
-        run: docker compose --profile local-db --profile local-objects down --volumes
+        run: docker compose -f compose.yaml -f compose.local.yaml --profile local-db --profile local-objects down --volumes

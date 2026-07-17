@@ -1,0 +1,10 @@
+services:
+  airflow:
+    volumes:
+      - type: bind
+        source: ${GIT_KNOWN_HOSTS_PATH}
+        target: /var/lib/airflow/.ssh/known_hosts
+        read_only: true
+        bind:
+          create_host_path: false
+

@@ -6,7 +6,6 @@ from datetime import datetime
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.sdk import Param, dag, get_current_context, task
-from example_pipeline.messages import build_message
 
 
 @dag(
@@ -21,7 +20,7 @@ def runtime_smoke():
     @task
     def create_message() -> dict[str, str]:
         context = get_current_context()
-        return build_message(context["params"]["message"])
+        return {"message": context["params"]["message"].strip()}
 
     @task
     def log_message(payload: dict[str, str]) -> None:
