@@ -43,6 +43,10 @@ docker compose exec airflow \
   cat /var/lib/airflow/simple_auth_manager_passwords.json.generated
 ```
 
+To expose only the authenticated Airflow UI on a trusted local network, set
+`AIRFLOW_UI_HOST=0.0.0.0` when starting the launcher. Database and object-store
+ports keep their localhost-only defaults.
+
 Useful options:
 
 ```text
