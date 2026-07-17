@@ -1,6 +1,7 @@
 .git
 .github
 .env
+.workbench
 .DS_Store
 __pycache__
 *.pyc

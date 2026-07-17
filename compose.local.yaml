@@ -1,0 +1,16 @@
+services:
+  airflow:
+    volumes:
+      - type: bind
+        source: ${PIPELINE_ROOT:-./example-pipeline}/dags
+        target: /opt/airflow/dags
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PIPELINE_ROOT:-./example-pipeline}/src
+        target: /opt/pipeline/src
+        read_only: true
+        bind:
+          create_host_path: false
+

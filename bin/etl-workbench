@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parent.parent
+STATE = ROOT / ".workbench"
+BASE_IMAGE = "etl-workbench:local"
+
+
+def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
+    print("+", " ".join(command), flush=True)
+    subprocess.run(command, cwd=ROOT, env=env, check=True)
+
+
+def existing_file(value: str, label: str) -> Path:
+    path = Path(value).expanduser().resolve()
+    if not path.is_file():
+        raise SystemExit(f"{label} does not exist: {path}")
+    return path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build and start a Git-backed Airflow pipeline locally."
+    )
+    parser.add_argument("repository", help="Git repository URL")
+    parser.add_argument("--ref", default="main", help="branch, tag, or commit")
+    parser.add_argument("--subdir", default="dags", help="DAG directory in the repository")
+    parser.add_argument("--image", help="use an existing pipeline image instead of building")
+    parser.add_argument("--env", help="pipeline-owned environment file")
+    parser.add_argument("--ssh-key", help="private SSH key for Git and the image build")
+    parser.add_argument("--known-hosts", default="~/.ssh/known_hosts")
+    parser.add_argument("--git-connection", help="use an existing Airflow Git connection")
+    parser.add_argument("--external-db", action="store_true", help="do not start local PostgreSQL")
+    parser.add_argument(
+        "--external-objects", action="store_true", help="do not start local object storage"
+    )
+    return parser.parse_args()
+
+
+def bundle_config(args: argparse.Namespace, connection_id: str) -> str:
+    kwargs: dict[str, object] = {
+        "tracking_ref": args.ref,
+        "subdir": args.subdir,
+    }
+    kwargs["git_conn_id"] = connection_id
+    return json.dumps(
+        [
+            {
+                "name": "pipeline",
+                "classpath": "airflow.providers.git.bundles.git.GitDagBundle",
+                "kwargs": kwargs,
+            }
+        ],
+        separators=(",", ":"),
+    )
+
+
+def main() -> None:
+    args = parse_args()
+    if args.ssh_key and args.git_connection:
+        raise SystemExit("use either --ssh-key or --git-connection, not both")
+
+    pipeline_env = existing_file(args.env, "pipeline environment file") if args.env else None
+    ssh_key = existing_file(args.ssh_key, "SSH key") if args.ssh_key else None
+    known_hosts = existing_file(args.known_hosts, "known_hosts file") if ssh_key else None
+
+    image = args.image
+    if not image:
+        run(["docker", "build", "-t", BASE_IMAGE, "."])
+        digest = hashlib.sha256(f"{args.repository}\0{args.ref}".encode()).hexdigest()[:12]
+        image = f"etl-pipeline:{digest}"
+        command = [
+            "docker",
+            "build",
+            "-t",
+            image,
+            "--build-arg",
+            f"ETL_WORKBENCH_IMAGE={BASE_IMAGE}",
+            "-f",
+            "Dockerfile.airflow",
+        ]
+        if ssh_key:
+            command.extend(["--ssh", f"default={ssh_key}"])
+        command.append(f"{args.repository}#{args.ref}")
+        run(command)
+
+    connection_id = args.git_connection or "workbench_git"
+    runtime_lines: list[str] = []
+    compose_files = ["-f", "compose.yaml"]
+    compose_env = os.environ.copy()
+
+    if not args.git_connection:
+        connection = {
+            "conn_type": "git",
+            "host": args.repository,
+        }
+        if ssh_key:
+            connection["extra"] = {
+                "private_key": ssh_key.read_text(),
+                "strict_host_key_checking": "yes",
+                "known_hosts_file": "/var/lib/airflow/.ssh/known_hosts",
+            }
+        runtime_lines.append(
+            "AIRFLOW_CONN_WORKBENCH_GIT=" + json.dumps(connection, separators=(",", ":"))
+        )
+
+    if ssh_key:
+        compose_files.extend(["-f", "compose.git-ssh.yaml"])
+        compose_env["GIT_KNOWN_HOSTS_PATH"] = str(known_hosts)
+
+    runtime_lines.append(
+        "AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST="
+        + bundle_config(args, connection_id)
+    )
+    STATE.mkdir(exist_ok=True)
+    runtime_env = STATE / "runtime.env"
+    runtime_env.write_text("\n".join(runtime_lines) + "\n")
+    runtime_env.chmod(0o600)
+
+    compose_env["AIRFLOW_IMAGE"] = image
+    compose_env["WORKBENCH_ENV_FILE"] = str(runtime_env)
+    if pipeline_env:
+        compose_env["PIPELINE_ENV_FILE"] = str(pipeline_env)
+
+    command = ["docker", "compose", *compose_files]
+    if not args.external_db:
+        command.extend(["--profile", "local-db"])
+    if not args.external_objects:
+        command.extend(["--profile", "local-objects"])
+    command.extend(["up", "-d", "--wait"])
+    run(command, env=compose_env)
+    print("Airflow: http://127.0.0.1:18080", flush=True)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(error.returncode) from error
