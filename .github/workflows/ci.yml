@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check public boundary
+        run: scripts/check-public-boundary.sh
+
+      - name: Validate all storage modes
+        run: |
+          docker compose config --quiet
+          docker compose --profile local-db config --quiet
+          docker compose --profile local-objects config --quiet
+          docker compose --profile local-db --profile local-objects config --quiet
+
+      - name: Build image
+        run: docker build -t etl-workbench:local .
+
+      - name: Check installed packages
+        run: docker compose run --rm airflow python -m pip check
+
+      - name: Import example DAGs
+        run: >-
+          docker compose run --rm airflow python -c
+          'from airflow.models import DagBag;
+          bag = DagBag("/opt/airflow/dags");
+          assert not bag.import_errors, bag.import_errors;
+          assert {"workbench_runtime_smoke", "workbench_storage_smoke"} <= set(bag.dags)'
+
+      - name: Run full local smoke
+        run: |
+          docker compose --profile local-db --profile local-objects up -d --wait
+          docker compose exec airflow airflow dags test workbench_runtime_smoke 2026-01-01
+          docker compose exec airflow airflow dags test workbench_storage_smoke 2026-01-01
+
+      - name: Show service logs after failure
+        if: failure()
+        run: docker compose --profile local-db --profile local-objects logs --no-color
+
+      - name: Remove disposable volumes
+        if: always()
+        run: docker compose --profile local-db --profile local-objects down --volumes

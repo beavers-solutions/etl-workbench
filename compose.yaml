@@ -1,0 +1,126 @@
+name: etl-workbench
+
+x-airflow-environment: &airflow-environment
+  AIRFLOW_HOME: /var/lib/airflow
+  AIRFLOW__API__HOST: 0.0.0.0
+  AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__CORE__PARALLELISM: "4"
+  AIRFLOW__CORE__TEST_CONNECTION: Disabled
+  AIRFLOW_CONN_LOCAL_POSTGRES: ${AIRFLOW_CONN_LOCAL_POSTGRES:-postgresql://etl:etl-local@postgres:5432/etl}
+  AIRFLOW_CONN_LOCAL_S3: ${AIRFLOW_CONN_LOCAL_S3:-{"conn_type":"aws","login":"minio-local","password":"minio-local-secret","extra":{"endpoint_url":"http://minio.localhost:9000","region_name":"us-east-1","config_kwargs":{"s3":{"addressing_style":"path"}}}}}
+  ETL_LOCAL_BUCKET: ${ETL_LOCAL_BUCKET:-etl-local}
+  PYTHONPATH: /opt/pipeline/src
+
+services:
+  airflow:
+    image: ${AIRFLOW_IMAGE:-etl-workbench:local}
+    command: ["airflow", "standalone"]
+    restart: unless-stopped
+    env_file:
+      - path: ${PIPELINE_ENV_FILE:-./pipeline.env}
+        required: false
+    environment:
+      <<: *airflow-environment
+    ports:
+      - "127.0.0.1:${AIRFLOW_UI_PORT:-18080}:8080"
+    volumes:
+      - airflow-home:/var/lib/airflow
+      - type: bind
+        source: ${PIPELINE_ROOT:-./example-pipeline}/dags
+        target: /opt/airflow/dags
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PIPELINE_ROOT:-./example-pipeline}/src
+        target: /opt/pipeline/src
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PIPELINE_ROOT:-./example-pipeline}/pyproject.toml
+        target: /opt/pipeline/pyproject.toml
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      minio-init:
+        condition: service_completed_successfully
+        required: false
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/api/v2/monitor/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 45s
+    networks:
+      - workbench
+
+  postgres:
+    image: postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa
+    profiles: ["local-db"]
+    environment:
+      POSTGRES_DB: etl
+      POSTGRES_USER: etl
+      POSTGRES_PASSWORD: etl-local
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U etl -d etl"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - workbench
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    profiles: ["local-objects"]
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      - MINIO_ROOT_USER=minio-local
+      - MINIO_ROOT_PASSWORD=minio-local-secret
+      - MINIO_KMS_SECRET_KEY
+    ports:
+      - "127.0.0.1:${MINIO_API_PORT:-59000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-59001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      workbench:
+        aliases:
+          - minio.localhost
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z@sha256:aead63c77f9db9107f1696fb08ecb0faeda23729cde94b0f663edf4fe09728e3
+    profiles: ["local-objects"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 minio-local minio-local-secret
+        && mc mb --ignore-existing local/${ETL_LOCAL_BUCKET:-etl-local}
+    restart: "no"
+    networks:
+      - workbench
+
+volumes:
+  airflow-home:
+  postgres-data:
+  minio-data:
+
+networks:
+  workbench:
+    driver: bridge
