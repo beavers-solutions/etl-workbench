@@ -108,6 +108,7 @@ base URL (or set `openai_client_kwargs.base_url` in Extra).
 | --- | --- |
 | `llm_kimi` | `https://api.moonshot.ai/v1` |
 | `llm_deepseek` | `https://api.deepseek.com` |
+| `llm_gemini` | `https://generativelanguage.googleapis.com/v1beta/openai/` |
 | `llm_qwen` | Model Studio endpoint for the selected region and workspace |
 | `llm_mistral` | `https://api.mistral.ai/v1` |
 | `llm_xai` | `https://api.x.ai/v1` |
@@ -119,7 +120,9 @@ OpenAI.
 
 Connection testing is enabled for this trusted, single-user workbench. It
 makes a live request with the stored credential; for the OpenAI provider, this
-is a model-list request.
+is a model-list request. Gemini's OpenAI-compatible endpoint does not expose
+that model-list route, so validate a Gemini connection with a Chat Completions
+task instead.
 
 ## Local path development
 
