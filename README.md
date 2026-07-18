@@ -97,6 +97,25 @@ Local profile connection IDs are `local_postgres` and `local_s3`; the local
 bucket is `etl-local`. External connections may be created in the Airflow UI or
 provided as `AIRFLOW_CONN_*` variables in the pipeline environment file.
 
+## LLM connections
+
+The workbench image includes the Airflow OpenAI provider. Create each provider
+as an independent `openai` Connection in the Airflow UI; its **Password** is
+the provider-specific API key. Use the **Host** field for the OpenAI client's
+base URL (or set `openai_client_kwargs.base_url` in Extra).
+
+| Connection ID | Host |
+| --- | --- |
+| `llm_kimi` | `https://api.moonshot.ai/v1` |
+| `llm_deepseek` | `https://api.deepseek.com` |
+| `llm_qwen` | Model Studio endpoint for the selected region and workspace |
+| `llm_mistral` | `https://api.mistral.ai/v1` |
+
+Pipeline code selects the `conn_id` and model name. It must not contain API
+keys. For portability across these providers, use the Chat Completions API and
+avoid OpenAI-specific APIs unless that pipeline is intentionally tied to
+OpenAI.
+
 ## Local path development
 
 The included example can be mounted read-only without Git:
