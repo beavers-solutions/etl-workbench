@@ -7,7 +7,7 @@ x-airflow-environment: &airflow-environment
   AIRFLOW__CORE__EXECUTOR: LocalExecutor
   AIRFLOW__CORE__LOAD_EXAMPLES: "false"
   AIRFLOW__CORE__PARALLELISM: "4"
-  AIRFLOW__CORE__TEST_CONNECTION: Disabled
+  AIRFLOW__CORE__TEST_CONNECTION: Enabled
   AIRFLOW_CONN_LOCAL_POSTGRES: ${AIRFLOW_CONN_LOCAL_POSTGRES:-postgresql://etl:etl-local@postgres:5432/etl}
   AIRFLOW_CONN_LOCAL_S3: ${AIRFLOW_CONN_LOCAL_S3:-{"conn_type":"aws","login":"minio-local","password":"minio-local-secret","extra":{"endpoint_url":"http://minio.localhost:9000","region_name":"us-east-1","config_kwargs":{"s3":{"addressing_style":"path"}}}}}
   ETL_LOCAL_BUCKET: ${ETL_LOCAL_BUCKET:-etl-local}

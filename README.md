@@ -110,11 +110,16 @@ base URL (or set `openai_client_kwargs.base_url` in Extra).
 | `llm_deepseek` | `https://api.deepseek.com` |
 | `llm_qwen` | Model Studio endpoint for the selected region and workspace |
 | `llm_mistral` | `https://api.mistral.ai/v1` |
+| `llm_xai` | `https://api.x.ai/v1` |
 
 Pipeline code selects the `conn_id` and model name. It must not contain API
 keys. For portability across these providers, use the Chat Completions API and
 avoid OpenAI-specific APIs unless that pipeline is intentionally tied to
 OpenAI.
+
+Connection testing is enabled for this trusted, single-user workbench. It
+makes a live request with the stored credential; for the OpenAI provider, this
+is a model-list request.
 
 ## Local path development
 
