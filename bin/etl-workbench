@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -13,6 +14,17 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 STATE = ROOT / ".workbench"
 BASE_IMAGE = "etl-workbench:local"
+
+
+@dataclass(frozen=True)
+class DagBundle:
+    """One Git-backed DAG source loaded by the shared Airflow runtime."""
+
+    name: str
+    repository: str
+    ref: str
+    subdir: str
+    git_connection: str
 
 
 def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
@@ -31,10 +43,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build and start a Git-backed Airflow pipeline locally."
     )
-    parser.add_argument("repository", help="Git repository URL")
+    parser.add_argument("repository", nargs="?", help="single pipeline Git repository URL")
     parser.add_argument("--ref", default="main", help="branch, tag, or commit")
     parser.add_argument("--subdir", default="dags", help="DAG directory in the repository")
-    parser.add_argument("--image", help="use an existing pipeline image instead of building")
+    parser.add_argument("--image", help="use an existing Airflow image instead of building one pipeline image")
+    parser.add_argument(
+        "--bundle-manifest",
+        help="JSON manifest for multiple Git DAG sources; requires --image with all source packages installed",
+    )
     parser.add_argument("--env", help="pipeline-owned environment file")
     parser.add_argument("--ssh-key", help="private SSH key for Git and the image build")
     parser.add_argument("--known-hosts", default="~/.ssh/known_hosts")
@@ -46,72 +62,151 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def bundle_config(args: argparse.Namespace, connection_id: str) -> str:
-    kwargs: dict[str, object] = {
-        "tracking_ref": args.ref,
-        "subdir": args.subdir,
-    }
-    kwargs["git_conn_id"] = connection_id
+def bundle_config(bundles: list[DagBundle]) -> str:
     return json.dumps(
         [
             {
-                "name": "pipeline",
+                "name": bundle.name,
                 "classpath": "airflow.providers.git.bundles.git.GitDagBundle",
-                "kwargs": kwargs,
+                "kwargs": {
+                    "tracking_ref": bundle.ref,
+                    "subdir": bundle.subdir,
+                    "git_conn_id": bundle.git_connection,
+                },
             }
+            for bundle in bundles
         ],
         separators=(",", ":"),
     )
+
+
+def bundle_manifest(path: Path) -> list[DagBundle]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(f"bundle manifest cannot be read: {path}") from error
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise SystemExit("bundle manifest must be an object with version: 1")
+    raw_sources = payload.get("sources")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise SystemExit("bundle manifest must contain a non-empty sources array")
+
+    bundles: list[DagBundle] = []
+    names: set[str] = set()
+    connection_ids: set[str] = set()
+    for raw in raw_sources:
+        if not isinstance(raw, dict):
+            raise SystemExit("each bundle source must be an object")
+        name = raw.get("name")
+        repository = raw.get("repository")
+        ref = raw.get("ref", "main")
+        subdir = raw.get("subdir", "dags")
+        if (
+            not isinstance(name, str)
+            or not name
+            or not all(character.isalnum() or character in "_-" for character in name)
+            or not isinstance(repository, str)
+            or not repository.strip()
+            or not isinstance(ref, str)
+            or not ref.strip()
+            or not isinstance(subdir, str)
+            or not subdir.strip()
+        ):
+            raise SystemExit("each source needs non-empty name, repository, ref and subdir values")
+        if name in names:
+            raise SystemExit(f"bundle source name is repeated: {name}")
+        names.add(name)
+        connection_id = f"workbench_git_{name.replace('-', '_')}"
+        if connection_id in connection_ids:
+            raise SystemExit(
+                "bundle source names must produce distinct Git connection IDs: "
+                f"{name}"
+            )
+        connection_ids.add(connection_id)
+        bundles.append(
+            DagBundle(
+                name=name,
+                repository=repository.strip(),
+                ref=ref.strip(),
+                subdir=subdir.strip(),
+                git_connection=connection_id,
+            )
+        )
+    return bundles
+
+
+def runtime_connection_line(bundle: DagBundle, ssh_key: Path | None) -> str:
+    connection: dict[str, object] = {"conn_type": "git", "host": bundle.repository}
+    if ssh_key:
+        connection["extra"] = {
+            "private_key": ssh_key.read_text(),
+            "strict_host_key_checking": "yes",
+            "known_hosts_file": "/var/lib/airflow/.ssh/known_hosts",
+        }
+    environment_name = "AIRFLOW_CONN_" + bundle.git_connection.upper()
+    return environment_name + "=" + json.dumps(connection, separators=(",", ":"))
 
 
 def main() -> None:
     args = parse_args()
     if args.ssh_key and args.git_connection:
         raise SystemExit("use either --ssh-key or --git-connection, not both")
+    if args.repository and args.bundle_manifest:
+        raise SystemExit("use either one repository or --bundle-manifest, not both")
+    if not args.repository and not args.bundle_manifest:
+        raise SystemExit("provide one repository or --bundle-manifest")
+    if args.bundle_manifest and args.git_connection:
+        raise SystemExit("--git-connection is only available for the single-repository mode")
 
     pipeline_env = existing_file(args.env, "pipeline environment file") if args.env else None
     ssh_key = existing_file(args.ssh_key, "SSH key") if args.ssh_key else None
     known_hosts = existing_file(args.known_hosts, "known_hosts file") if ssh_key else None
 
-    image = args.image
-    if not image:
-        run(["docker", "build", "-t", BASE_IMAGE, "."])
-        digest = hashlib.sha256(f"{args.repository}\0{args.ref}".encode()).hexdigest()[:12]
-        image = f"etl-pipeline:{digest}"
-        command = [
-            "docker",
-            "build",
-            "-t",
-            image,
-            "--build-arg",
-            f"ETL_WORKBENCH_IMAGE={BASE_IMAGE}",
-            "-f",
-            "Dockerfile.airflow",
+    runtime_lines: list[str]
+    if args.bundle_manifest:
+        manifest = existing_file(args.bundle_manifest, "bundle manifest")
+        if not args.image:
+            raise SystemExit("--bundle-manifest requires --image with every source package installed")
+        image = args.image
+        bundles = bundle_manifest(manifest)
+        runtime_lines = [runtime_connection_line(bundle, ssh_key) for bundle in bundles]
+    else:
+        assert args.repository is not None
+        connection_id = args.git_connection or "workbench_git"
+        bundles = [
+            DagBundle(
+                name="pipeline",
+                repository=args.repository,
+                ref=args.ref,
+                subdir=args.subdir,
+                git_connection=connection_id,
+            )
         ]
-        if ssh_key:
-            command.extend(["--ssh", f"default={ssh_key}"])
-        command.append(f"{args.repository}#{args.ref}")
-        run(command)
+        image = args.image
+        if not image:
+            run(["docker", "build", "-t", BASE_IMAGE, "."])
+            digest = hashlib.sha256(f"{args.repository}\0{args.ref}".encode()).hexdigest()[:12]
+            image = f"etl-pipeline:{digest}"
+            command = [
+                "docker",
+                "build",
+                "-t",
+                image,
+                "--build-arg",
+                f"ETL_WORKBENCH_IMAGE={BASE_IMAGE}",
+                "-f",
+                "Dockerfile.airflow",
+            ]
+            if ssh_key:
+                command.extend(["--ssh", f"default={ssh_key}"])
+            command.append(f"{args.repository}#{args.ref}")
+            run(command)
+        runtime_lines = []
+        if not args.git_connection:
+            runtime_lines.append(runtime_connection_line(bundles[0], ssh_key))
 
-    connection_id = args.git_connection or "workbench_git"
-    runtime_lines: list[str] = []
     compose_files = ["-f", "compose.yaml"]
     compose_env = os.environ.copy()
-
-    if not args.git_connection:
-        connection = {
-            "conn_type": "git",
-            "host": args.repository,
-        }
-        if ssh_key:
-            connection["extra"] = {
-                "private_key": ssh_key.read_text(),
-                "strict_host_key_checking": "yes",
-                "known_hosts_file": "/var/lib/airflow/.ssh/known_hosts",
-            }
-        runtime_lines.append(
-            "AIRFLOW_CONN_WORKBENCH_GIT=" + json.dumps(connection, separators=(",", ":"))
-        )
 
     if ssh_key:
         compose_files.extend(["-f", "compose.git-ssh.yaml"])
@@ -119,7 +214,7 @@ def main() -> None:
 
     runtime_lines.append(
         "AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST="
-        + bundle_config(args, connection_id)
+        + bundle_config(bundles)
     )
     STATE.mkdir(exist_ok=True)
     runtime_env = STATE / "runtime.env"
@@ -139,6 +234,7 @@ def main() -> None:
     command.extend(["up", "-d", "--wait"])
     run(command, env=compose_env)
     print("Airflow: http://127.0.0.1:18080", flush=True)
+    print("DAG bundles: " + ", ".join(bundle.name for bundle in bundles), flush=True)
 
 
 if __name__ == "__main__":

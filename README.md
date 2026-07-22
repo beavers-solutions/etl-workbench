@@ -53,6 +53,7 @@ Useful options:
 --ref VERSION            branch, tag, or commit; default: main
 --subdir PATH            DAG directory; default: dags
 --image IMAGE            use a prebuilt pipeline image
+--bundle-manifest FILE   load several Git DAG sources; requires --image
 --env FILE               pipeline-owned runtime environment
 --external-db            do not start local PostgreSQL
 --external-objects       do not start local object storage
@@ -63,6 +64,51 @@ With `--ssh-key`, the launcher writes a generated Airflow connection to the
 ignored `.workbench/runtime.env` with mode `0600`. The private key is used by
 Docker BuildKit and the local Airflow container; it is not copied into the
 image. Host-key checking uses `~/.ssh/known_hosts` by default.
+
+## Several product sources in one Airflow
+
+One Airflow can load DAG entrypoints from several independent Git repositories.
+Use a versioned JSON manifest when a shared factory serves several trusted
+products:
+
+```json
+{
+  "version": 1,
+  "sources": [
+    {
+      "name": "learning-platform",
+      "repository": "git@github.com:example/learning-platform.git",
+      "ref": "main",
+      "subdir": "airflow/dags"
+    },
+    {
+      "name": "beavers-data",
+      "repository": "git@github.com:example/beavers-data-pipelines.git",
+      "ref": "main",
+      "subdir": "dags"
+    }
+  ]
+}
+```
+
+Then start the factory with an image which contains the compatible Python
+packages of **every** listed product:
+
+```bash
+./bin/etl-workbench \
+  --bundle-manifest trusted-products.json \
+  --image trusted-airflow-pipelines:2026-07-22 \
+  --ssh-key ~/.ssh/id_ed25519
+```
+
+The factory creates one Git Connection per source and configures Airflow's
+native `GitDagBundle` list. A Git bundle provides DAG files only; it must never
+install arbitrary dependencies at parse time. The shared image is therefore an
+explicit release artifact, built and tested from pinned product revisions.
+
+Keep source-specific Connections, object prefixes and Pools named by product.
+That separates operational ownership inside one trusted Airflow, but does not
+turn this local workbench into an isolation boundary for untrusted code.
 
 ## Pipeline repository contract
 
